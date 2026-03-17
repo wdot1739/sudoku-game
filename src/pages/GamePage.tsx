@@ -1,202 +1,113 @@
 import { useState, useEffect, useCallback } from 'react';
-import SudokuBoard from '../components/SudokuBoard';
-import NumberPad from '../components/NumberPad';
-import GameHeader from '../components/GameHeader';
-import GameControls from '../components/GameControls';
-import DifficultySelect from '../components/DifficultySelect';
-import GameComplete from '../components/GameComplete';
-import type { Cell, Position, Difficulty } from '../types/game';
+import SudokuBoard from '@/components/SudokuBoard';
+import NumberPad from '@/components/NumberPad';
+import GameHeader from '@/components/GameHeader';
+import GameControls from '@/components/GameControls';
+import DifficultySelect from '@/components/DifficultySelect';
+import GameComplete from '@/components/GameComplete';
+import { generatePuzzle, isBoardSolved, getHint } from '@/lib/sudoku';
+import type { Board, CellValue, Difficulty, GameStatus } from '@/types/sudoku';
 
-// --- Sudoku Generator ---
-
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function isValid(grid: number[][], row: number, col: number, num: number): boolean {
-  for (let i = 0; i < 9; i++) {
-    if (grid[row][i] === num || grid[i][col] === num) return false;
-  }
-  const br = Math.floor(row / 3) * 3;
-  const bc = Math.floor(col / 3) * 3;
-  for (let r = br; r < br + 3; r++) {
-    for (let c = bc; c < bc + 3; c++) {
-      if (grid[r][c] === num) return false;
-    }
-  }
-  return true;
-}
-
-function solveSudoku(grid: number[][]): boolean {
-  for (let r = 0; r < 9; r++) {
-    for (let c = 0; c < 9; c++) {
-      if (grid[r][c] === 0) {
-        const nums = shuffle([1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        for (const n of nums) {
-          if (isValid(grid, r, c, n)) {
-            grid[r][c] = n;
-            if (solveSudoku(grid)) return true;
-            grid[r][c] = 0;
-          }
-        }
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-function generatePuzzle(difficulty: Difficulty): { puzzle: number[][]; solution: number[][] } {
-  const grid = Array.from({ length: 9 }, () => Array(9).fill(0));
-  solveSudoku(grid);
-  const solution = grid.map((r) => [...r]);
-
-  const removeCounts: Record<Difficulty, number> = {
-    easy: 36,
-    medium: 45,
-    hard: 52,
-    expert: 58,
-  };
-
-  const positions = shuffle(
-    Array.from({ length: 81 }, (_, i) => [Math.floor(i / 9), i % 9])
-  );
-
-  let removed = 0;
-  for (const [r, c] of positions) {
-    if (removed >= removeCounts[difficulty]) break;
-    grid[r][c] = 0;
-    removed++;
-  }
-
-  return { puzzle: grid, solution };
-}
-
-function createBoard(puzzle: number[][]): Cell[][] {
-  return puzzle.map((row) =>
-    row.map((val) => ({
-      value: val || null,
-      given: val !== 0,
-      notes: new Set<number>(),
-      error: false,
-    }))
-  );
-}
-
-function cloneBoard(board: Cell[][]): Cell[][] {
+function cloneBoard(board: Board): Board {
   return board.map((row) =>
     row.map((cell) => ({
       ...cell,
-      notes: new Set(cell.notes),
+      notes: [...cell.notes],
     }))
   );
 }
 
-// --- Component ---
-
 export default function GamePage() {
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
-  const [board, setBoard] = useState<Cell[][]>([]);
-  const [solution, setSolution] = useState<number[][]>([]);
-  const [selected, setSelected] = useState<Position | null>(null);
+  const [board, setBoard] = useState<Board>([]);
+  const [solution, setSolution] = useState<CellValue[][]>([]);
+  const [selectedCell, setSelectedCell] = useState<[number, number] | null>(null);
   const [mistakes, setMistakes] = useState(0);
-  const [time, setTime] = useState(0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isComplete, setIsComplete] = useState(false);
-  const [notesMode, setNotesMode] = useState(false);
-  const [history, setHistory] = useState<Cell[][][]>([]);
+  const [timer, setTimer] = useState(0);
+  const [status, setStatus] = useState<GameStatus>('idle');
+  const [noteMode, setNoteMode] = useState(false);
+  const [history, setHistory] = useState<Board[]>([]);
   const [showDifficultyDialog, setShowDifficultyDialog] = useState(false);
   const maxMistakes = 3;
 
   const startNewGame = useCallback((diff: Difficulty) => {
     const { puzzle, solution: sol } = generatePuzzle(diff);
-    setBoard(createBoard(puzzle));
+    setBoard(puzzle);
     setSolution(sol);
     setDifficulty(diff);
-    setSelected(null);
+    setSelectedCell(null);
     setMistakes(0);
-    setTime(0);
-    setIsRunning(true);
-    setIsComplete(false);
-    setNotesMode(false);
+    setTimer(0);
+    setStatus('playing');
+    setNoteMode(false);
     setHistory([]);
     setShowDifficultyDialog(false);
   }, []);
 
-  // Start initial game
   useEffect(() => {
     startNewGame('medium');
   }, [startNewGame]);
 
-  // Timer
   useEffect(() => {
-    if (!isRunning) return;
-    const id = setInterval(() => setTime((t) => t + 1), 1000);
+    if (status !== 'playing') return;
+    const id = setInterval(() => setTimer((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [isRunning]);
+  }, [status]);
 
-  // Check completion
   useEffect(() => {
-    if (board.length === 0) return;
-    const complete = board.every((row) =>
-      row.every((cell) => cell.value !== null && !cell.error)
-    );
-    if (complete) {
-      setIsComplete(true);
-      setIsRunning(false);
+    if (board.length === 0 || status !== 'playing') return;
+    if (isBoardSolved(board, solution)) {
+      setStatus('won');
     }
-  }, [board]);
+  }, [board, solution, status]);
 
-  const handleCellClick = useCallback((pos: Position) => {
-    setSelected(pos);
+  const handleCellClick = useCallback((row: number, col: number) => {
+    setSelectedCell([row, col]);
   }, []);
 
   const handleNumber = useCallback(
     (num: number) => {
-      if (!selected || isComplete) return;
-      const cell = board[selected.row][selected.col];
-      if (cell.given) return;
+      if (!selectedCell || status !== 'playing') return;
+      const [r, c] = selectedCell;
+      const cell = board[r][c];
+      if (cell.isGiven) return;
 
       setHistory((h) => [...h, cloneBoard(board)]);
       const newBoard = cloneBoard(board);
-      const target = newBoard[selected.row][selected.col];
+      const target = newBoard[r][c];
 
-      if (notesMode) {
+      if (noteMode) {
         if (target.value) return;
-        if (target.notes.has(num)) {
-          target.notes.delete(num);
+        const idx = target.notes.indexOf(num);
+        if (idx >= 0) {
+          target.notes.splice(idx, 1);
         } else {
-          target.notes.add(num);
+          target.notes.push(num);
+          target.notes.sort();
         }
       } else {
-        target.notes = new Set();
-        target.value = num;
-        if (num !== solution[selected.row][selected.col]) {
-          target.error = true;
+        target.notes = [];
+        target.value = num as CellValue;
+        if (num !== solution[r][c]) {
+          target.isError = true;
           setMistakes((m) => {
             const next = m + 1;
             if (next >= maxMistakes) {
-              setIsRunning(false);
+              setStatus('paused');
             }
             return next;
           });
         } else {
-          target.error = false;
-          // Remove this number from notes in same row/col/box
+          target.isError = false;
           for (let i = 0; i < 9; i++) {
-            newBoard[selected.row][i].notes.delete(num);
-            newBoard[i][selected.col].notes.delete(num);
+            newBoard[r][i].notes = newBoard[r][i].notes.filter((n) => n !== num);
+            newBoard[i][c].notes = newBoard[i][c].notes.filter((n) => n !== num);
           }
-          const br = Math.floor(selected.row / 3) * 3;
-          const bc = Math.floor(selected.col / 3) * 3;
-          for (let r = br; r < br + 3; r++) {
-            for (let c = bc; c < bc + 3; c++) {
-              newBoard[r][c].notes.delete(num);
+          const br = Math.floor(r / 3) * 3;
+          const bc = Math.floor(c / 3) * 3;
+          for (let rr = br; rr < br + 3; rr++) {
+            for (let cc = bc; cc < bc + 3; cc++) {
+              newBoard[rr][cc].notes = newBoard[rr][cc].notes.filter((n) => n !== num);
             }
           }
         }
@@ -204,22 +115,23 @@ export default function GamePage() {
 
       setBoard(newBoard);
     },
-    [selected, board, solution, notesMode, isComplete]
+    [selectedCell, board, solution, noteMode, status]
   );
 
   const handleErase = useCallback(() => {
-    if (!selected || isComplete) return;
-    const cell = board[selected.row][selected.col];
-    if (cell.given) return;
-    if (!cell.value && cell.notes.size === 0) return;
+    if (!selectedCell || status !== 'playing') return;
+    const [r, c] = selectedCell;
+    const cell = board[r][c];
+    if (cell.isGiven) return;
+    if (!cell.value && cell.notes.length === 0) return;
 
     setHistory((h) => [...h, cloneBoard(board)]);
     const newBoard = cloneBoard(board);
-    newBoard[selected.row][selected.col].value = null;
-    newBoard[selected.row][selected.col].error = false;
-    newBoard[selected.row][selected.col].notes = new Set();
+    newBoard[r][c].value = null;
+    newBoard[r][c].isError = false;
+    newBoard[r][c].notes = [];
     setBoard(newBoard);
-  }, [selected, board, isComplete]);
+  }, [selectedCell, board, status]);
 
   const handleUndo = useCallback(() => {
     if (history.length === 0) return;
@@ -229,24 +141,34 @@ export default function GamePage() {
   }, [history]);
 
   const handleHint = useCallback(() => {
-    if (!selected || isComplete) return;
-    const cell = board[selected.row][selected.col];
-    if (cell.given || (cell.value && !cell.error)) return;
+    if (status !== 'playing') return;
+
+    const hintPos = selectedCell
+      && !board[selectedCell[0]][selectedCell[1]].isGiven
+      && (!board[selectedCell[0]][selectedCell[1]].value || board[selectedCell[0]][selectedCell[1]].isError)
+      ? selectedCell
+      : getHint(board, solution);
+
+    if (!hintPos) return;
+    const [hr, hc] = hintPos;
 
     setHistory((h) => [...h, cloneBoard(board)]);
     const newBoard = cloneBoard(board);
-    const target = newBoard[selected.row][selected.col];
-    target.value = solution[selected.row][selected.col];
-    target.error = false;
-    target.notes = new Set();
-    target.given = true;
+    newBoard[hr][hc].value = solution[hr][hc];
+    newBoard[hr][hc].isError = false;
+    newBoard[hr][hc].notes = [];
+    newBoard[hr][hc].isGiven = true;
     setBoard(newBoard);
-  }, [selected, board, solution, isComplete]);
+    setSelectedCell([hr, hc]);
+  }, [selectedCell, board, solution, status]);
 
-  // Keyboard navigation
+  const handlePauseResume = useCallback(() => {
+    setStatus((s) => (s === 'playing' ? 'paused' : s === 'paused' ? 'playing' : s));
+  }, []);
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (!isRunning) return;
+      if (status !== 'playing') return;
 
       if (e.key >= '1' && e.key <= '9') {
         handleNumber(parseInt(e.key));
@@ -258,7 +180,12 @@ export default function GamePage() {
         return;
       }
 
-      if (!selected) return;
+      if (e.key === 'n' || e.key === 'N') {
+        setNoteMode((n) => !n);
+        return;
+      }
+
+      if (!selectedCell) return;
 
       const moves: Record<string, [number, number]> = {
         ArrowUp: [-1, 0],
@@ -270,15 +197,15 @@ export default function GamePage() {
       const move = moves[e.key];
       if (move) {
         e.preventDefault();
-        const newRow = Math.max(0, Math.min(8, selected.row + move[0]));
-        const newCol = Math.max(0, Math.min(8, selected.col + move[1]));
-        setSelected({ row: newRow, col: newCol });
+        const newRow = Math.max(0, Math.min(8, selectedCell[0] + move[0]));
+        const newCol = Math.max(0, Math.min(8, selectedCell[1] + move[1]));
+        setSelectedCell([newRow, newCol]);
       }
     };
 
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [selected, isRunning, handleNumber, handleErase]);
+  }, [selectedCell, status, handleNumber, handleErase]);
 
   if (board.length === 0) return null;
 
@@ -286,31 +213,31 @@ export default function GamePage() {
     <div className="game-page">
       <div className="game-container">
         <GameHeader
-          time={time}
+          time={timer}
           mistakes={mistakes}
           maxMistakes={maxMistakes}
           difficulty={difficulty}
-          isRunning={isRunning}
-          onPauseResume={() => setIsRunning((r) => !r)}
+          status={status}
+          onPauseResume={handlePauseResume}
           onNewGame={() => setShowDifficultyDialog(true)}
         />
         <SudokuBoard
           board={board}
-          selected={selected}
+          selectedCell={selectedCell}
           onCellClick={handleCellClick}
         />
         <GameControls
-          notesMode={notesMode}
+          notesMode={noteMode}
           onUndo={handleUndo}
-          onNotesToggle={() => setNotesMode((n) => !n)}
+          onNotesToggle={() => setNoteMode((n) => !n)}
           onHint={handleHint}
         />
         <NumberPad
           board={board}
-          notesMode={notesMode}
+          noteMode={noteMode}
           onNumber={handleNumber}
           onErase={handleErase}
-          onNotesToggle={() => setNotesMode((n) => !n)}
+          onNotesToggle={() => setNoteMode((n) => !n)}
         />
       </div>
 
@@ -321,8 +248,8 @@ export default function GamePage() {
       />
 
       <GameComplete
-        open={isComplete}
-        time={time}
+        open={status === 'won'}
+        time={timer}
         mistakes={mistakes}
         difficulty={difficulty}
         onPlayAgain={() => setShowDifficultyDialog(true)}
